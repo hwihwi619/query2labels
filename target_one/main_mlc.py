@@ -183,6 +183,7 @@ def main():
     os.environ["AWS_ACCESS_KEY_ID"] = "minio"
     os.environ["AWS_SECRET_ACCESS_KEY"] = "minio123"
     mlflow.set_experiment("Transfer-CvT_OneLabel")
+    run_name=None
     if args.run_name:
         run_name=run_name
     mlflow.start_run(run_name=run_name)
@@ -356,7 +357,7 @@ def main_worker(args, logger):
     mAPs_ema = AverageMeter('mAP_ema', ':5.5f', val_only=True)
     progress_ema = ProgressMeter(
             args.epochs,
-            [losses_ema, mAP_ema, acc_ema, f1score_ema, recall_ema, precision_ema],
+            [losses_ema, mAPs_ema, acc_ema, f1score_ema, recall_ema, precision_ema],
             prefix='=> EMA Test Epoch: ')
 
 
@@ -380,7 +381,7 @@ def main_worker(args, logger):
         torch.cuda.empty_cache()
 
         # train for one epoch
-        loss = train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, args, logger)
+        loss, acc, f1score, precision, recall = train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, args, logger)
 
         if epoch % args.val_interval == 0:
 
@@ -391,9 +392,6 @@ def main_worker(args, logger):
             mAPs.update(mAP)
             losses_ema.update(loss_ema)
             mAPs_ema.update(mAP_ema)
-            epoch_time.update(time.time() - end)
-            end = time.time()
-            eta.update(epoch_time.avg * (args.epochs - epoch - 1))
 
             regular_mAP_list.append(mAP)
             ema_mAP_list.append(mAP_ema)
@@ -473,16 +471,22 @@ def main_worker(args, logger):
 def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, args, logger):
     scaler = torch.cuda.amp.GradScaler(enabled=args.amp)
     
-    batch_time = AverageMeter('T', ':5.3f')
-    data_time = AverageMeter('DT', ':5.3f')
-    speed_gpu = AverageMeter('S1', ':.1f')
-    speed_all = AverageMeter('SA', ':.1f')
+    metric_acc = BinaryAccuracy(num_labels=args.num_class).cuda()
+    metric_f1score = BinaryF1Score(num_labels=args.num_class).cuda()
+    metric_recall = BinaryRecall(num_labels=args.num_class).cuda()
+    metric_precision = BinaryPrecision(num_labels=args.num_class).cuda()
+    
     losses = AverageMeter('Loss', ':5.3f')
     lr = AverageMeter('LR', ':.3e', val_only=True)
-    mem = AverageMeter('Mem', ':.0f', val_only=True)
+    
+    acc = AverageMeter('Acc', ':5.3f')
+    f1score = AverageMeter('f1score', ':5.3f')
+    precision = AverageMeter('precision', ':5.3f')
+    recall = AverageMeter('recall', ':5.3f')
+    
     progress = ProgressMeter(
         len(train_loader),
-        [batch_time, data_time, speed_gpu, speed_all, lr, losses, mem],
+        [lr, losses, acc, f1score, precision, recall],
         prefix="Epoch: [{}/{}]".format(epoch, args.epochs))
 
     def get_learning_rate(optimizer):
@@ -497,9 +501,6 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
 
     end = time.time()
     for i, (images, target) in enumerate(train_loader):
-        # measure data loading time
-        data_time.update(time.time() - end)
-
         images = images.cuda(non_blocking=True)
         target = target.cuda(non_blocking=True)
 
@@ -509,31 +510,39 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
             loss = criterion(output, target)
             if args.loss_dev > 0:
                 loss *= args.loss_dev
+            output_sm = torch.sigmoid(output)
+            
+        # update metrcis
+        metric_acc.update(output_sm, target)
+        metric_f1score.update(output_sm, target)
+        metric_precision.update(output_sm, target)
+        metric_recall.update(output_sm, target)
+
+        # update average
+        acc.update(metric_acc.compute())
+        f1score.update(metric_f1score.compute())
+        precision.update(metric_precision.compute())
+        recall.update(metric_recall.compute())
 
         # record loss
         losses.update(loss.item(), images.size(0))
-        mem.update(torch.cuda.max_memory_allocated() / 1024.0 / 1024.0)
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
+        
         # one cycle learning rate
         scheduler.step()
         lr.update(get_learning_rate(optimizer))
         if epoch >= args.ema_epoch:
             ema_m.update(model)
-        # measure elapsed time
-        batch_time.update(time.time() - end)
-        end = time.time()
-        speed_gpu.update(images.size(0) / batch_time.val, batch_time.val)
-        speed_all.update(images.size(0) * dist.get_world_size() / batch_time.val, batch_time.val)
 
         if i % args.print_freq == 0:
             progress.display(i, logger)
 
-    return losses.avg
+    return loss, acc.avg, f1score.avg, precision.avg, recall.avg
 
 
 
@@ -567,7 +576,7 @@ def validate(val_loader, model, criterion, args, logger):
                 loss = criterion(output, target)
                 if args.loss_dev > 0:
                     loss *= args.loss_dev
-                output_sm = nn.functional.sigmoid(output)
+                output_sm = torch.sigmoid(output)
                 if torch.isnan(loss):
                     saveflag = True
 
@@ -576,7 +585,7 @@ def validate(val_loader, model, criterion, args, logger):
             mem.update(torch.cuda.max_memory_allocated() / 1024.0 / 1024.0)
 
             # save some data
-            # output_sm = nn.functional.sigmoid(output)
+            # output_sm = torch.sigmoid(output)
             _item = torch.cat((output_sm.detach().cpu(), target.detach().cpu()), 1)
             # del output_sm
             # del target
