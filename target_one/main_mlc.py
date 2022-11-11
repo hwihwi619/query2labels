@@ -20,29 +20,10 @@ import torch.multiprocessing as mp
 import torch.utils.data
 import torch.utils.data.distributed
 
-import mlflow
-to_mlflow=['dataname', 'img_size', 'num_class', 'orid_norm', \
-    'backbone', 'pretrained', 'transfer', 'transfer_omit', \
-        'optim', 'eps', 'dtgfl', 'gamma_pos', 'gamma_neg', 'loss_clip', 'lr', 'weight_decay', 'dropout', \
-            'dim_feedforward', 'hidden_dim', 'enc_layers', 'dec_layers', \
-                'dataset_dir', 'nheads', 'pre_norm', 'amp']
-
 from torch.utils.tensorboard import SummaryWriter
-import torchmetrics
-# from torchmetrics.functional.classification import multilabel_accuracy
-# from torchmetrics.functional.classification import multilabel_f1_score
-# from torchmetrics.classification import MultilabelAccuracy
-# from torchmetrics.classification import MultilabelF1Score
-# from torchmetrics.classification import MultilabelConfusionMatrix
-# from torchmetrics.classification import MultilabelPrecision
-# from torchmetrics.classification import MultilabelRecall
-from torchmetrics.classification import BinaryAccuracy
-from torchmetrics.classification import BinaryF1Score
-from torchmetrics.classification import BinaryPrecision
-from torchmetrics.classification import BinaryRecall
 
 import _init_paths
-from dataset.get_dataset_only import get_datasets
+from dataset.get_dataset import get_datasets
 
 from utils.logger import setup_logger
 import models
@@ -55,7 +36,7 @@ from utils.slconfig import get_raw_dict
 
 def parser_args():
     parser = argparse.ArgumentParser(description='Query2Label MSCOCO Training')
-    parser.add_argument('--dataname', help='dataname', default='custom', choices=['coco14', 'custom'])
+    parser.add_argument('--dataname', help='dataname', default='coco14', choices=['coco14'])
     parser.add_argument('--dataset_dir', help='dir of dataset', default='/comp_robot/liushilong/data/COCO14/')
     parser.add_argument('--img_size', default=448, type=int,
                         help='size of input images')
@@ -68,7 +49,6 @@ def parser_args():
                         help='use pre-trained model. default is False. ')
     parser.add_argument('--optim', default='AdamW', type=str, choices=['AdamW', 'Adam_twd'],
                         help='which optim to use')
-    parser.add_argument('--run_name', default=None, type=str)
 
     # loss
     parser.add_argument('--eps', default=1e-5, type=float,
@@ -110,9 +90,6 @@ def parser_args():
     parser.add_argument('--resume', default='', type=str, metavar='PATH',
                         help='path to latest checkpoint (default: none)')
     parser.add_argument('--resume_omit', default=[], type=str, nargs='*')
-    parser.add_argument('--transfer', default='', type=str, metavar='PATH',
-                        help='path to latest checkpoint (default: none)')
-    parser.add_argument('--transfer_omit', default=[], type=str, nargs='*')
     parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                         help='evaluate model on validation set')
 
@@ -190,29 +167,15 @@ def get_args():
 
 
 best_mAP = 0
-best_Acc = 0
+
 def main():
     args = get_args()
-    
-    mlflow.set_tracking_uri("http://192.168.0.56:5000")
-    remote_server_uri = "http://192.168.0.56:5000" # set to your server URI
-    mlflow.set_tracking_uri(remote_server_uri)
-    os.environ["MLFLOW_S3_ENDPOINT_URL"] = "http://192.168.0.56:9090"
-    os.environ["AWS_ACCESS_KEY_ID"] = "minio"
-    os.environ["AWS_SECRET_ACCESS_KEY"] = "minio123"
-    mlflow.set_experiment("Transfer-CvT_OneLabel")
-    if args.run_name:
-        run_name = args.run_name
-    mlflow.start_run(run_name=run_name)
-    for k, v in vars(args).items():
-        if k in to_mlflow:
-            mlflow.log_param(k,v)
     
     if 'WORLD_SIZE' in os.environ:
         assert args.world_size > 0, 'please set --world-size and --rank in the command line'
         # launch by torch.distributed.launch
         # Single node
-        #   python -m torch.distributed.launch --nproc_per_node=8 main.py --world-s 1 --rank 0 ...
+        #   python -m torch.distributed.launch --nproc_per_node=8 main.py --world-size 1 --rank 0 ...
         # Multi nodes
         #   python -m torch.distributed.launch --nproc_per_node=8 main.py --world-size 2 --rank 0 --dist-url 'tcp://IP_OF_NODE0:FREEPORT' ...
         #   python -m torch.distributed.launch --nproc_per_node=8 main.py --world-size 2 --rank 1 --dist-url 'tcp://IP_OF_NODE0:FREEPORT' ...
@@ -241,6 +204,7 @@ def main():
                                 world_size=args.world_size, rank=args.rank)
     cudnn.benchmark = True
     
+
     os.makedirs(args.output, exist_ok=True)
     logger = setup_logger(output=args.output, distributed_rank=dist.get_rank(), color=False, name="Q2L")
     logger.info("Command: "+' '.join(sys.argv))
@@ -258,7 +222,6 @@ def main():
 
 def main_worker(args, logger):
     global best_mAP
-    global best_Acc
 
     # build model
     model = build_q2l(args)
@@ -327,30 +290,6 @@ def main_worker(args, logger):
             torch.cuda.empty_cache() 
         else:
             logger.info("=> no checkpoint found at '{}'".format(args.resume))
-    
-    if args.transfer:
-        if os.path.isfile(args.transfer):
-            logger.info("=> loading checkpoint for Transfer'{}'".format(args.transfer))
-            checkpoint = torch.load(args.transfer, map_location=torch.device(dist.get_rank()))
-
-            if 'state_dict' in checkpoint:
-                state_dict = clean_state_dict(checkpoint['state_dict'])
-            elif 'model' in checkpoint:
-                state_dict = clean_state_dict(checkpoint['model'])
-            else:
-                raise ValueError("No model or state_dicr Found!!!")
-            logger.info("Omitting {}".format(args.transfer_omit))
-            # import ipdb; ipdb.set_trace()
-            for omit_name in args.transfer_omit:
-                del state_dict[omit_name]
-            
-            model.module.load_state_dict(state_dict, strict=False)            
-            
-            del checkpoint
-            del state_dict
-            torch.cuda.empty_cache() 
-        else:
-            logger.info("=> no checkpoint found at '{}'".format(args.transfer))
 
     # Data loading code
     train_dataset, val_dataset = get_datasets(args)
@@ -366,11 +305,13 @@ def main_worker(args, logger):
         val_dataset, batch_size=args.batch_size // dist.get_world_size(), shuffle=False,
         num_workers=args.workers, pin_memory=True, sampler=val_sampler)
 
-    # if args.evaluate:
-    #     _, mAP = validate(val_loader, model, criterion, args, logger)
-    #     logger.info(' * mAP {mAP:.5f}'
-    #           .format(mAP=mAP))
-    #     return
+
+    if args.evaluate:
+        _, mAP = validate(val_loader, model, criterion, args, logger)
+        logger.info(' * mAP {mAP:.5f}'
+              .format(mAP=mAP))
+        return
+    
 
     epoch_time = AverageMeterHMS('TT')
     eta = AverageMeterHMS('ETA', val_only=True)
@@ -385,6 +326,7 @@ def main_worker(args, logger):
 
     # one cycle learning rate
     scheduler = lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, steps_per_epoch=len(train_loader), epochs=args.epochs, pct_start=0.2)
+
 
     end = time.time()
     best_epoch = -1
@@ -402,55 +344,19 @@ def main_worker(args, logger):
         torch.cuda.empty_cache()
 
         # train for one epoch
-        loss, whole_acc, whole_precision, whole_recall, whole_f1score = train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, args, logger)
+        loss = train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, args, logger)
 
         if summary_writer:
             # tensorboard logger
             summary_writer.add_scalar('train_loss', loss, epoch)
+            # summary_writer.add_scalar('train_acc1', acc1, epoch)
             summary_writer.add_scalar('learning_rate', optimizer.param_groups[0]['lr'], epoch)
-            
-            mlflow.log_metric('metric/learning_rate', optimizer.param_groups[0]['lr'], step=epoch)
-            mlflow.log_metric('metric/train_whole_loss', loss, step=epoch)
-            mlflow.log_metric('metric/train_whole_acc', whole_acc, step=epoch)
-            # mlflow.log_metric('metric/train_whole_calculated_f1score', ((whole_precision*whole_recall)/(whole_precision+whole_recall)), step=epoch)
-            mlflow.log_metric('metric/train_whole_f1score', whole_f1score, step=epoch)
-            mlflow.log_metric('metric/train_whole_precision', whole_precision, step=epoch)
-            mlflow.log_metric('metric/train_whole_recall', whole_recall, step=epoch)
-            
-            # for idx, name in enumerate(category_map):
-            #     mlflow.log_metric(f'metric/{name}_acc', each_acc[idx], step=epoch)
-            #     mlflow.log_metric(f'metric/{name}_f1score', each_f1score[idx], step=epoch)
-            #     # mlflow.log_metric(f'metric/{name}_acc', each_acc[idx], step=epoch)
-            #     # mlflow.log_metric(f'metric/{name}_acc', each_acc[idx], step=epoch)
-                
 
         if epoch % args.val_interval == 0:
 
             # evaluate on validation set
-            loss, mAP, aps, whole_acc, whole_precision, whole_recall, whole_f1score = validate(val_loader, model, criterion, args, logger)
-            # for idx, conf in enumerate(aps):
-            #     mlflow.log_metric('conf/'+category_map[idx], conf, epoch)
-                
-            mlflow.log_metric('metric/valid_loss', loss, step=epoch)
-            mlflow.log_metric('metric/valid_mAP', mAP, step=epoch)
-            mlflow.log_metric('metric/valid_whole_acc', whole_acc, step=epoch)
-            # mlflow.log_metric('metric/valid_whole_calculated_f1score', ((whole_precision*whole_recall)/(whole_precision+whole_recall)), step=epoch)
-            mlflow.log_metric('metric/valid_whole_f1score', whole_f1score, step=epoch)
-            mlflow.log_metric('metric/valid_whole_precision', whole_precision, step=epoch)
-            mlflow.log_metric('metric/valid_whole_recall', whole_recall, step=epoch)
-                
-            loss_ema, mAP_ema, aps_ema, whole_acc_ema, whole_precision_ema, whole_recall_ema, whole_f1score_ema = validate(val_loader, ema_m.module, criterion, args, logger)
-            # for idx, conf in enumerate(aps_ema):
-            #     mlflow.log_metric('conf_ema/'+category_map[idx]+'_ema', conf, epoch)
-                
-            mlflow.log_metric('metric/valid_loss_ema', loss_ema, step=epoch)
-            mlflow.log_metric('metric/valid_mAP_ema', mAP_ema, step=epoch)
-            mlflow.log_metric('metric/valid_whole_acc_ema', whole_acc_ema, step=epoch)
-            # mlflow.log_metric('metric/valid_whole_calculated_f1score_ema', ((whole_precision_ema*whole_recall_ema)/(whole_precision_ema+whole_recall_ema)), step=epoch)
-            mlflow.log_metric('metric/valid_whole_f1score_ema', whole_f1score_ema, step=epoch)
-            mlflow.log_metric('metric/valid_whole_precision_ema', whole_precision_ema, step=epoch)
-            mlflow.log_metric('metric/valid_whole_recall_ema', whole_recall_ema, step=epoch)
-
+            loss, mAP = validate(val_loader, model, criterion, args, logger)
+            loss_ema, mAP_ema = validate(val_loader, ema_m.module, criterion, args, logger)
             losses.update(loss)
             mAPs.update(mAP)
             losses_ema.update(loss_ema)
@@ -487,53 +393,35 @@ def main_worker(args, logger):
             if is_best:
                 best_epoch = epoch
             best_mAP = max(mAP, best_mAP)
-            
-            is_best_acc = whole_acc > best_Acc
-            best_Acc = max(whole_acc, best_Acc)
-            
 
             logger.info("{} | Set best mAP {} in ep {}".format(epoch, best_mAP, best_epoch))
             logger.info("   | best regular mAP {} in ep {}".format(best_regular_mAP, best_regular_epoch))
-            logger.info("   | best Acc {}".format(best_Acc))
 
             if dist.get_rank() == 0:
                 save_checkpoint({
                     'epoch': epoch + 1,
+                    'arch': args.arch,
                     'state_dict': state_dict,
                     'best_mAP': best_mAP,
                     'optimizer' : optimizer.state_dict(),
-                }, is_best=is_best, filename='model_best_mAP', output_path = args.output)
-                mlflow.log_artifacts(args.output)
-            
-            if is_best_acc:
-                save_checkpoint({
-                    'epoch': epoch + 1,
-                    'state_dict': state_dict,
-                    'best_mAP': best_mAP,
-                    'optimizer' : optimizer.state_dict(),
-                }, is_best=True, filename='model_best_Acc', output_path = args.output)
-                mlflow.log_artifacts(args.output)
-
-            # filename='checkpoint_{:04d}'.format(epoch))
+                }, is_best=is_best, filename=os.path.join(args.output, 'checkpoint.pth.tar'))
+            # filename=os.path.join(args.output, 'checkpoint_{:04d}.pth.tar'.format(epoch))
 
             if math.isnan(loss) or math.isnan(loss_ema):
-                # save_checkpoint({
-                #     'epoch': epoch + 1,
-                #     # 'arch': args.arch,
-                #     'state_dict': model.state_dict(),
-                #     'best_mAP': best_mAP,
-                #     'optimizer' : optimizer.state_dict(),
-                # }, is_best=is_best, filename='checkpoint_nan'))
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'arch': args.arch,
+                    'state_dict': model.state_dict(),
+                    'best_mAP': best_mAP,
+                    'optimizer' : optimizer.state_dict(),
+                }, is_best=is_best, filename=os.path.join(args.output, 'checkpoint_nan.pth.tar'))
                 logger.info('Loss is NaN, break')
-                mlflow.log_artifacts(args.output)
-                mlflow.end_run()
-
                 sys.exit(1)
 
 
             # early stop
             if args.early_stop:
-                if best_epoch >= 0 and epoch - max(best_epoch, best_regular_epoch) > 5:
+                if best_epoch >= 0 and epoch - max(best_epoch, best_regular_epoch) > 8:
                     if len(ema_mAP_list) > 1 and ema_mAP_list[-1] < best_ema_mAP:
                         logger.info("epoch - best_epoch = {}, stop!".format(epoch - best_epoch))
                         if dist.get_rank() == 0 and args.kill_stop:
@@ -543,8 +431,6 @@ def main_worker(args, logger):
                         break
 
     print("Best mAP:", best_mAP)
-    mlflow.log_artifacts(args.output)
-    mlflow.end_run()
 
     if summary_writer:
         summary_writer.close()
@@ -554,36 +440,18 @@ def main_worker(args, logger):
 
 
 def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, args, logger):
-    metric_whole_acc = BinaryAccuracy(num_labels=args.num_class).cuda()
-    # metric_each_acc = BinaryAccuracy(num_labels=args.num_class, average=None).cuda()
-    metric_whole_f1score = BinaryF1Score(num_labels=args.num_class).cuda()
-    # metric_each_f1score = BinaryF1Score(num_labels=args.num_class, average=None).cuda()
-    # metric_confusion_matrix = MultilabelConfusionMatrix(num_labels=args.num_class).cuda()
-    
-    metric_whole_recall = BinaryRecall(num_labels=args.num_class).cuda()
-    # metric_each_recall = MultilabelPrecision(num_labels=args.num_class, average=None).cuda()
-    metric_whole_precision = BinaryPrecision(num_labels=args.num_class).cuda()
-    # metric_each_precision = BinaryRecall(num_labels=args.num_class, average=None).cuda()
-    
     scaler = torch.cuda.amp.GradScaler(enabled=args.amp)
     
+    batch_time = AverageMeter('T', ':5.3f')
+    data_time = AverageMeter('DT', ':5.3f')
+    speed_gpu = AverageMeter('S1', ':.1f')
+    speed_all = AverageMeter('SA', ':.1f')
     losses = AverageMeter('Loss', ':5.3f')
     lr = AverageMeter('LR', ':.3e', val_only=True)
-    
-    whole_acc = AverageMeter('Whole Acc', ':5.3f')
-    # each_acc = AverageMeter('Label Acc', ':5.3f')
-    whole_f1score = AverageMeter('Whole_f1score', ':5.3f')
-    # each_f1score = AverageMeter('Label_f1score', ':5.3f')
-    # confusion_matrix = AverageMeter('Confusion_Matrix', ':5.3f')
-    
-    whole_precision = AverageMeter('Whole precision', ':5.3f')
-    whole_recall = AverageMeter('Whole recall', ':5.3f')
-    # each_precision = AverageMeter('Each precision', ':5.3f')
-    # each_recall = AverageMeter('Each recall', ':5.3f')
-    
+    mem = AverageMeter('Mem', ':.0f', val_only=True)
     progress = ProgressMeter(
         len(train_loader),
-        [lr, losses, whole_acc, whole_f1score, whole_precision, whole_recall],
+        [batch_time, data_time, speed_gpu, speed_all, lr, losses, mem],
         prefix="Epoch: [{}/{}]".format(epoch, args.epochs))
 
     def get_learning_rate(optimizer):
@@ -596,7 +464,11 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
     # switch to train mode
     model.train()
 
+    end = time.time()
     for i, (images, target) in enumerate(train_loader):
+        # measure data loading time
+        data_time.update(time.time() - end)
+
         images = images.cuda(non_blocking=True)
         target = target.cuda(non_blocking=True)
 
@@ -606,34 +478,10 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
             loss = criterion(output, target)
             if args.loss_dev > 0:
                 loss *= args.loss_dev
-            output_sm = torch.sigmoid(output)
-
-        # update metrcis
-        metric_whole_acc.update(output_sm, target)
-        # metric_each_acc.update(output_sm, target)
-        metric_whole_f1score.update(output_sm, target)
-        # metric_each_f1score.update(output_sm, target)
-        # metric_confusion_matrix.update(output_sm.float(), target.int())
-        
-        metric_whole_precision.update(output_sm, target)
-        metric_whole_recall.update(output_sm, target)
-        # metric_each_precision.update(output_sm, target)
-        # metric_each_recall.update(output_sm, target)
-
-        # update average
-        whole_acc.update(metric_whole_acc.compute())
-        # each_acc.update(metric_each_acc.compute())
-        whole_f1score.update(metric_whole_f1score.compute())
-        # each_f1score.update(metric_each_f1score.compute())
-        # confusion_matrix.update(metric_confusion_matrix.compute())
-        
-        whole_precision.update(metric_whole_precision.compute())
-        whole_recall.update(metric_whole_recall.compute())
-        # each_precision.update(metric_each_precision.compute())
-        # each_recall.update(metric_each_recall.compute())
 
         # record loss
         losses.update(loss.item(), images.size(0))
+        mem.update(torch.cuda.max_memory_allocated() / 1024.0 / 1024.0)
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -645,44 +493,31 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
         lr.update(get_learning_rate(optimizer))
         if epoch >= args.ema_epoch:
             ema_m.update(model)
+        # measure elapsed time
+        batch_time.update(time.time() - end)
+        end = time.time()
+        speed_gpu.update(images.size(0) / batch_time.val, batch_time.val)
+        speed_all.update(images.size(0) * dist.get_world_size() / batch_time.val, batch_time.val)
 
         if i % args.print_freq == 0:
             progress.display(i, logger)
-            # print(whole_precision.avg, whole_recall.avg, whole_f1score.avg)
 
-    return loss, whole_acc.avg, whole_precision.avg, whole_recall.avg, whole_f1score.avg
+    return losses.avg
+
 
 
 @torch.no_grad()
 def validate(val_loader, model, criterion, args, logger):
-    metric_whole_acc = BinaryAccuracy(num_labels=args.num_class).cuda()
-    # metric_each_acc = BinaryAccuracy(num_labels=args.num_class, average=None).cuda()
-    metric_whole_f1score = BinaryF1Score(num_labels=args.num_class).cuda()
-    # metric_each_f1score = BinaryF1Score(num_labels=args.num_class, average=None).cuda()
-    # metric_confusion_matrix = MultilabelConfusionMatrix(num_labels=args.num_class).cuda()
-    
-    metric_whole_precision = BinaryPrecision(num_labels=args.num_class).cuda()
-    # metric_each_precision = BinaryRecall(num_labels=args.num_class, average=None).cuda()
-    metric_whole_recall = BinaryRecall(num_labels=args.num_class).cuda()
-    # metric_each_recall = MultilabelPrecision(num_labels=args.num_class, average=None).cuda()
-    
-    whole_acc = AverageMeter('Whole Acc', ':5.3f')
-    # each_acc = AverageMeter('Label Acc', ':5.3f')
-    whole_f1score = AverageMeter('Whole_f1score', ':5.3f')
-    # each_f1score = AverageMeter('Label_f1score', ':5.3f')
-    # confusion_matrix = AverageMeter('Confusion_Matrix', ':5.3f')
-    
-    whole_recall = AverageMeter('Whole recall', ':5.3f')
-    whole_precision = AverageMeter('Whole precision', ':5.3f')
-    # each_recall = AverageMeter('Each recall', ':5.3f')
-    # each_precision = AverageMeter('Each precision', ':5.3f')
-    
+    batch_time = AverageMeter('Time', ':5.3f')
     losses = AverageMeter('Loss', ':5.3f')
+    # Acc1 = AverageMeter('Acc@1', ':5.2f')
+    # top5 = AverageMeter('Acc@5', ':5.2f')
+    mem = AverageMeter('Mem', ':.0f', val_only=True)
     # mAP = AverageMeter('mAP', ':5.3f', val_only=)
 
     progress = ProgressMeter(
         len(val_loader),
-        [losses, whole_acc, whole_f1score, whole_recall, whole_precision],
+        [batch_time, losses, mem],
         prefix='Test: ')
 
     # switch to evaluate mode
@@ -690,6 +525,7 @@ def validate(val_loader, model, criterion, args, logger):
     model.eval()
     saved_data = []
     with torch.no_grad():
+        end = time.time()
         for i, (images, target) in enumerate(val_loader):
             images = images.cuda(non_blocking=True)
             target = target.cuda(non_blocking=True)
@@ -700,43 +536,24 @@ def validate(val_loader, model, criterion, args, logger):
                 loss = criterion(output, target)
                 if args.loss_dev > 0:
                     loss *= args.loss_dev
-                output_sm = torch.sigmoid(output)
+                output_sm = nn.functional.sigmoid(output)
                 if torch.isnan(loss):
                     saveflag = True
 
             # record loss
             losses.update(loss.item(), images.size(0))
-            
-            metric_whole_acc.update(output_sm, target)
-            # metric_each_acc.update(output_sm, target)
-            metric_whole_f1score.update(output_sm, target)
-            # metric_each_f1score.update(output_sm, target)
-            # metric_confusion_matrix.update(output_sm.float(), target.int())
-            
-            metric_whole_recall.update(output_sm, target)
-            metric_whole_precision.update(output_sm, target)
-            # metric_each_precision.update(output_sm, target)
-            # metric_each_recall.update(output_sm, target)
-
-            # update average
-            whole_acc.update(metric_whole_acc.compute())
-            # each_acc.update(metric_each_acc.compute())
-            whole_f1score.update(metric_whole_f1score.compute())
-            # each_f1score.update(metric_each_f1score.compute())
-            # confusion_matrix.update(metric_confusion_matrix.compute())
-            
-            whole_recall.update(metric_whole_recall.compute())
-            whole_precision.update(metric_whole_precision.compute())
-            # each_precision.update(metric_each_precision.compute())
-            # each_recall.update(metric_each_recall.compute())
+            mem.update(torch.cuda.max_memory_allocated() / 1024.0 / 1024.0)
 
             # save some data
+            # output_sm = nn.functional.sigmoid(output)
             _item = torch.cat((output_sm.detach().cpu(), target.detach().cpu()), 1)
-            del output_sm
-            del target
+            # del output_sm
+            # del target
             saved_data.append(_item)
 
             # measure elapsed time
+            batch_time.update(time.time() - end)
+            end = time.time()
 
             if i % args.print_freq == 0 and dist.get_rank() == 0:
                 progress.display(i, logger)
@@ -763,9 +580,7 @@ def validate(val_loader, model, criterion, args, logger):
             metric_func = voc_mAP                
             mAP, aps = metric_func([os.path.join(args.output, _filename) for _filename in filenamelist], args.num_class, return_each=True)
             
-            logger.info("  mAP: {} Acc: {} f1score: {} recall: {} precision: {}".format(mAP, whole_acc.avg, whole_f1score.avg, whole_recall.avg, whole_precision.avg))
-                    # [losses, whole_acc, whole_f1score, whole_recall, whole_precision],
-
+            logger.info("  mAP: {}".format(mAP))
             logger.info("   aps: {}".format(np.array2string(aps, precision=5)))
         else:
             mAP = 0
@@ -773,7 +588,7 @@ def validate(val_loader, model, criterion, args, logger):
         if dist.get_world_size() > 1:
             dist.barrier()
 
-    return loss_avg, mAP, aps, whole_acc.avg, whole_precision.avg, whole_recall.avg, whole_f1score.avg,
+    return loss_avg, mAP
 
 
 ##################################################################################
@@ -829,10 +644,10 @@ def _meter_reduce(meter):
     return meter_avg.item()
 
 
-def save_checkpoint(state, is_best, filename='checkpoint.pth.tar', output_path='path/to/output'):
+def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     # torch.save(state, filename)
     if is_best:
-        torch.save(state, os.path.join(output_path, f'ep{state["epoch"]}_{filename}.pth.tar'))
+        torch.save(state, os.path.split(filename)[0] + '/model_best.pth.tar')
         # shutil.copyfile(filename, os.path.split(filename)[0] + '/model_best.pth.tar')
 
 
@@ -905,4 +720,4 @@ def kill_process(filename:str, holdpid:int) -> List[str]:
     return idlist
 
 if __name__ == '__main__':
-    main()    
+    main()
