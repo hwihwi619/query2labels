@@ -11,7 +11,8 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "justMyCode": true,
-            //custom, pretrained
+            
+            // target_one
             "args": [
                 "--dataset_dir", "/home/hwi/Downloads/VQIS-POC matched/chest/normal",
                 "--run_name", "가슴멍 VS 정상",

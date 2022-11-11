@@ -20,6 +20,18 @@ import torch.multiprocessing as mp
 import torch.utils.data
 import torch.utils.data.distributed
 
+import mlflow
+to_mlflow=['dataname', 'img_size', 'num_class', 'orid_norm', \
+    'backbone', 'pretrained', 'transfer', 'transfer_omit', \
+        'optim', 'eps', 'dtgfl', 'gamma_pos', 'gamma_neg', 'loss_clip', 'lr', 'weight_decay', 'dropout', \
+            'dim_feedforward', 'hidden_dim', 'enc_layers', 'dec_layers', \
+                'dataset_dir', 'nheads', 'pre_norm', 'amp']
+import torchmetrics
+from torchmetrics.classification import BinaryAccuracy
+from torchmetrics.classification import BinaryF1Score
+from torchmetrics.classification import BinaryPrecision
+from torchmetrics.classification import BinaryRecall
+
 from torch.utils.tensorboard import SummaryWriter
 
 import _init_paths
@@ -36,8 +48,9 @@ from utils.slconfig import get_raw_dict
 
 def parser_args():
     parser = argparse.ArgumentParser(description='Query2Label MSCOCO Training')
-    parser.add_argument('--dataname', help='dataname', default='coco14', choices=['coco14'])
+    parser.add_argument('--dataname', help='dataname', default='custom', choices=['coco14', 'custom'])
     parser.add_argument('--dataset_dir', help='dir of dataset', default='/comp_robot/liushilong/data/COCO14/')
+    parser.add_argument('--run_name', default=None, type=str)
     parser.add_argument('--img_size', default=448, type=int,
                         help='size of input images')
 
@@ -90,8 +103,9 @@ def parser_args():
     parser.add_argument('--resume', default='', type=str, metavar='PATH',
                         help='path to latest checkpoint (default: none)')
     parser.add_argument('--resume_omit', default=[], type=str, nargs='*')
-    parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
-                        help='evaluate model on validation set')
+    parser.add_argument('--transfer', default='', type=str, metavar='PATH',
+                        help='path to latest checkpoint (default: none)')
+    parser.add_argument('--transfer_omit', default=[], type=str, nargs='*')    
 
     parser.add_argument('--ema-decay', default=0.9997, type=float, metavar='M',
                         help='decay of model ema')
@@ -112,15 +126,6 @@ def parser_args():
 
 
     # data aug
-    parser.add_argument('--cutout', action='store_true', default=False,
-                        help='apply cutout')
-    parser.add_argument('--n_holes', type=int, default=1,
-                        help='number of holes to cut out from image')              
-    parser.add_argument('--length', type=int, default=-1,
-                        help='length of the holes. suggest to use default setting -1.')
-    parser.add_argument('--cut_fact', type=float, default=0.5,
-                        help='mutual exclusion with length. ') 
-
     parser.add_argument('--orid_norm', action='store_true', default=False,
                         help='using mean [0,0,0] and std [1,1,1] to normalize input images')
 
@@ -165,20 +170,28 @@ def get_args():
     return args
 
 
-
 best_mAP = 0
+best_Acc = 0
 
 def main():
     args = get_args()
     
+    mlflow.set_tracking_uri("http://192.168.0.56:5000")
+    remote_server_uri = "http://192.168.0.56:5000" # set to your server URI
+    mlflow.set_tracking_uri(remote_server_uri)
+    os.environ["MLFLOW_S3_ENDPOINT_URL"] = "http://192.168.0.56:9090"
+    os.environ["AWS_ACCESS_KEY_ID"] = "minio"
+    os.environ["AWS_SECRET_ACCESS_KEY"] = "minio123"
+    mlflow.set_experiment("Transfer-CvT_OneLabel")
+    if args.run_name:
+        run_name=run_name
+    mlflow.start_run(run_name=run_name)
+    for k, v in vars(args).items():
+        if k in to_mlflow:
+            mlflow.log_param(k,v)
+    
     if 'WORLD_SIZE' in os.environ:
         assert args.world_size > 0, 'please set --world-size and --rank in the command line'
-        # launch by torch.distributed.launch
-        # Single node
-        #   python -m torch.distributed.launch --nproc_per_node=8 main.py --world-size 1 --rank 0 ...
-        # Multi nodes
-        #   python -m torch.distributed.launch --nproc_per_node=8 main.py --world-size 2 --rank 0 --dist-url 'tcp://IP_OF_NODE0:FREEPORT' ...
-        #   python -m torch.distributed.launch --nproc_per_node=8 main.py --world-size 2 --rank 1 --dist-url 'tcp://IP_OF_NODE0:FREEPORT' ...
         local_world_size = int(os.environ['WORLD_SIZE'])
         args.world_size = args.world_size * local_world_size
         args.rank = args.rank * local_world_size + args.local_rank
@@ -259,12 +272,6 @@ def main_worker(args, logger):
         raise NotImplementedError
 
 
-    # tensorboard
-    if dist.get_rank() == 0:
-        summary_writer = SummaryWriter(log_dir=args.output)
-    else:
-        summary_writer = None
-
     # optionally resume from a checkpoint
     if args.resume:
         if os.path.isfile(args.resume):
@@ -290,6 +297,30 @@ def main_worker(args, logger):
             torch.cuda.empty_cache() 
         else:
             logger.info("=> no checkpoint found at '{}'".format(args.resume))
+        
+    elif args.transfer:
+        if os.path.isfile(args.transfer):
+            logger.info("=> loading checkpoint for Transfer'{}'".format(args.transfer))
+            checkpoint = torch.load(args.transfer, map_location=torch.device(dist.get_rank()))
+
+            if 'state_dict' in checkpoint:
+                state_dict = clean_state_dict(checkpoint['state_dict'])
+            elif 'model' in checkpoint:
+                state_dict = clean_state_dict(checkpoint['model'])
+            else:
+                raise ValueError("No model or state_dicr Found!!!")
+            logger.info("Omitting {}".format(args.transfer_omit))
+            # import ipdb; ipdb.set_trace()
+            for omit_name in args.transfer_omit:
+                del state_dict[omit_name]
+            
+            model.module.load_state_dict(state_dict, strict=False)            
+            
+            del checkpoint
+            del state_dict
+            torch.cuda.empty_cache() 
+        else:
+            logger.info("=> no checkpoint found at '{}'".format(args.transfer))
 
     # Data loading code
     train_dataset, val_dataset = get_datasets(args)
@@ -304,25 +335,30 @@ def main_worker(args, logger):
     val_loader = torch.utils.data.DataLoader(
         val_dataset, batch_size=args.batch_size // dist.get_world_size(), shuffle=False,
         num_workers=args.workers, pin_memory=True, sampler=val_sampler)
-
-
-    if args.evaluate:
-        _, mAP = validate(val_loader, model, criterion, args, logger)
-        logger.info(' * mAP {mAP:.5f}'
-              .format(mAP=mAP))
-        return
     
-
-    epoch_time = AverageMeterHMS('TT')
-    eta = AverageMeterHMS('ETA', val_only=True)
+    
+    acc = AverageMeter('Acc', ':5.3f')
+    f1score = AverageMeter('f1score', ':5.3f')
+    recall = AverageMeter('recall', ':5.3f')
+    precision = AverageMeter('precision', ':5.3f')
     losses = AverageMeter('Loss', ':5.3f', val_only=True)
-    losses_ema = AverageMeter('Loss_ema', ':5.3f', val_only=True)
     mAPs = AverageMeter('mAP', ':5.5f', val_only=True)
-    mAPs_ema = AverageMeter('mAP_ema', ':5.5f', val_only=True)
     progress = ProgressMeter(
         args.epochs,
-        [eta, epoch_time, losses, mAPs, losses_ema, mAPs_ema],
+        [losses, mAPs, acc, f1score, precision, recall],
         prefix='=> Test Epoch: ')
+    
+    acc_ema = AverageMeter('Acc_ema', ':5.3f')
+    f1score_ema = AverageMeter('f1score_ema', ':5.3f')
+    recall_ema = AverageMeter('recall_ema', ':5.3f')
+    precision_ema = AverageMeter('precision_ema', ':5.3f')
+    losses_ema = AverageMeter('Loss_ema', ':5.3f', val_only=True)
+    mAPs_ema = AverageMeter('mAP_ema', ':5.5f', val_only=True)
+    progress_ema = ProgressMeter(
+            args.epochs,
+            [losses_ema, mAP_ema, acc_ema, f1score_ema, recall_ema, precision_ema],
+            prefix='=> EMA Test Epoch: ')
+
 
     # one cycle learning rate
     scheduler = lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, steps_per_epoch=len(train_loader), epochs=args.epochs, pct_start=0.2)
@@ -346,12 +382,6 @@ def main_worker(args, logger):
         # train for one epoch
         loss = train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, args, logger)
 
-        if summary_writer:
-            # tensorboard logger
-            summary_writer.add_scalar('train_loss', loss, epoch)
-            # summary_writer.add_scalar('train_acc1', acc1, epoch)
-            summary_writer.add_scalar('learning_rate', optimizer.param_groups[0]['lr'], epoch)
-
         if epoch % args.val_interval == 0:
 
             # evaluate on validation set
@@ -369,6 +399,7 @@ def main_worker(args, logger):
             ema_mAP_list.append(mAP_ema)
 
             progress.display(epoch, logger)
+            progress_ema.display(epoch, logger)
 
             if summary_writer:
                 # tensorboard logger

@@ -1,6 +1,4 @@
 import torchvision.transforms as transforms
-from dataset.cocodataset import CoCoDataset
-from utils.cutout import SLCutoutPIL
 from randaugment import RandAugment
 import os.path as osp
 
@@ -18,13 +16,7 @@ def get_datasets(args):
                                             RandAugment(),
                                                transforms.ToTensor(),
                                                normalize]
-    try:
-        # for q2l_infer scripts
-        if args.cutout:
-            print("Using Cutout!!!")
-            train_data_transform_list.insert(1, SLCutoutPIL(n_holes=args.n_holes, length=args.length))
-    except Exception as e:
-        Warning(e)
+
     train_data_transform = transforms.Compose(train_data_transform_list)
 
     test_data_transform = transforms.Compose([
