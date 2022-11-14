@@ -186,7 +186,7 @@ def main():
     mlflow.set_experiment("Transfer-CvT_OneLabel")
     run_name=None
     if args.run_name:
-        run_name=run_name
+        run_name=args.run_name
     mlflow.start_run(run_name=run_name)
     for k, v in vars(args).items():
         if k in to_mlflow:
