@@ -27,6 +27,7 @@ def get_datasets(args):
 
     if args.dataname =='custom':
         dataset_dir = args.dataset_dir
+        target_map=args.target.split(",")
         print('args.dataset_dir', args.dataset_dir)
         if args.resume: 
             print('resume')
@@ -41,11 +42,13 @@ def get_datasets(args):
             train_data_transform_list.insert(1, transforms.RandomHorizontalFlip())
             train_dataset = CustomDataset_csv_multiLabel(
                 sourcePath=osp.join(dataset_dir, 'train'),
+                target=target_map,
                 transform=train_data_transform,
                 # csv_file=osp.join(dataset_dir, 'annotation/VQIS-TRAIN.csv')
             )
             val_dataset = CustomDataset_csv_multiLabel(
                 sourcePath=osp.join(dataset_dir, 'val'),
+                target=target_map,
                 transform=test_data_transform,
                 # csv_file=osp.join(dataset_dir, 'annotation/VQIS-VAL.csv')
             )

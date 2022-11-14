@@ -51,6 +51,7 @@ def parser_args():
     parser.add_argument('--dataname', help='dataname', default='custom', choices=['coco14', 'custom'])
     parser.add_argument('--dataset_dir', help='dir of dataset', default='/comp_robot/liushilong/data/COCO14/')
     parser.add_argument('--run_name', default=None, type=str)
+    parser.add_argument('--target', default=None, type=str)
     parser.add_argument('--img_size', default=448, type=int,
                         help='size of input images')
 
@@ -236,6 +237,7 @@ def main():
 
 def main_worker(args, logger):
     global best_mAP
+    global best_Acc
 
     # build model
     model = build_q2l(args)
@@ -383,13 +385,37 @@ def main_worker(args, logger):
         # train for one epoch
         loss, acc, f1score, precision, recall = train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, args, logger)
 
+        mlflow.log_metric('metric/learning_rate', optimizer.param_groups[0]['lr'], step=epoch)
+        mlflow.log_metric('metric/train_loss', loss, step=epoch)
+        mlflow.log_metric('metric/train_acc', acc, step=epoch)
+        mlflow.log_metric('metric/train_f1score', f1score, step=epoch)
+        mlflow.log_metric('metric/train_precision', precision, step=epoch)
+        mlflow.log_metric('metric/train_recall', recall, step=epoch)
+
         if epoch % args.val_interval == 0:
 
             # evaluate on validation set
-            loss, mAP = validate(val_loader, model, criterion, args, logger)
-            loss_ema, mAP_ema = validate(val_loader, ema_m.module, criterion, args, logger)
+            loss, mAP, aps, acc, f1score, precision, recall  = validate(val_loader, model, criterion, args, logger)
+
+            mlflow.log_metric('metric/valid_loss', loss, step=epoch)
+            mlflow.log_metric('metric/valid_mAP', mAP, step=epoch)
+            mlflow.log_metric('metric/valid_acc', acc, step=epoch)
+            mlflow.log_metric('metric/valid_f1score', f1score, step=epoch)
+            mlflow.log_metric('metric/valid_precision', precision, step=epoch)
+            mlflow.log_metric('metric/valid_recall', recall, step=epoch)
+            
             losses.update(loss)
             mAPs.update(mAP)
+              
+            loss_ema, mAP_ema, aps_ema, acc_ema, f1score_ema, precision_ema, recall_ema = validate(val_loader, ema_m.module, criterion, args, logger)
+            
+            mlflow.log_metric('metric/valid_loss_ema', loss_ema, step=epoch)
+            mlflow.log_metric('metric/valid_mAP_ema', mAP_ema, step=epoch)
+            mlflow.log_metric('metric/valid_acc_ema', acc_ema, step=epoch)
+            mlflow.log_metric('metric/valid_f1score_ema', f1score_ema, step=epoch)
+            mlflow.log_metric('metric/valid_precision_ema', precision_ema, step=epoch)
+            mlflow.log_metric('metric/valid_recall_ema', recall_ema, step=epoch)
+            
             losses_ema.update(loss_ema)
             mAPs_ema.update(mAP_ema)
 
@@ -398,13 +424,6 @@ def main_worker(args, logger):
 
             progress.display(epoch, logger)
             progress_ema.display(epoch, logger)
-
-            if summary_writer:
-                # tensorboard logger
-                summary_writer.add_scalar('val_loss', loss, epoch)
-                summary_writer.add_scalar('val_mAP', mAP, epoch)
-                summary_writer.add_scalar('val_loss_ema', loss_ema, epoch)
-                summary_writer.add_scalar('val_mAP_ema', mAP_ema, epoch)
 
             # remember best (regular) mAP and corresponding epochs
             if mAP > best_regular_mAP:
@@ -422,35 +441,43 @@ def main_worker(args, logger):
             if is_best:
                 best_epoch = epoch
             best_mAP = max(mAP, best_mAP)
-
+            
+            is_best_acc = acc > best_Acc
+            best_Acc = max(acc, best_Acc)
+            # not implemented best acc_ema
+            
             logger.info("{} | Set best mAP {} in ep {}".format(epoch, best_mAP, best_epoch))
             logger.info("   | best regular mAP {} in ep {}".format(best_regular_mAP, best_regular_epoch))
+            logger.info("   | best Acc {}".format(best_Acc))
 
-            if dist.get_rank() == 0:
+            if dist.get_rank() == 0 or is_best_acc:
                 save_checkpoint({
                     'epoch': epoch + 1,
-                    'arch': args.arch,
                     'state_dict': state_dict,
                     'best_mAP': best_mAP,
                     'optimizer' : optimizer.state_dict(),
-                }, is_best=is_best, filename=os.path.join(args.output, 'checkpoint.pth.tar'))
-            # filename=os.path.join(args.output, 'checkpoint_{:04d}.pth.tar'.format(epoch))
+                }, is_best=is_best, filename='model_best', output = args.output)
+                mlflow.log_artifacts(args.output)
 
             if math.isnan(loss) or math.isnan(loss_ema):
-                save_checkpoint({
-                    'epoch': epoch + 1,
-                    'arch': args.arch,
-                    'state_dict': model.state_dict(),
-                    'best_mAP': best_mAP,
-                    'optimizer' : optimizer.state_dict(),
-                }, is_best=is_best, filename=os.path.join(args.output, 'checkpoint_nan.pth.tar'))
+                # save_checkpoint({
+                #     'epoch': epoch + 1,
+                #     # 'arch': args.arch,
+                #     'state_dict': model.state_dict(),
+                #     'best_mAP': best_mAP,
+                #     'optimizer' : optimizer.state_dict(),
+                # }, is_best=is_best, filename='checkpoint_nan'))
                 logger.info('Loss is NaN, break')
+                mlflow.log_artifacts(args.output)
+                mlflow.end_run()
+
                 sys.exit(1)
 
 
             # early stop
             if args.early_stop:
                 if best_epoch >= 0 and epoch - max(best_epoch, best_regular_epoch) > 8:
+                    mlflow.log_artifacts(args.output)
                     if len(ema_mAP_list) > 1 and ema_mAP_list[-1] < best_ema_mAP:
                         logger.info("epoch - best_epoch = {}, stop!".format(epoch - best_epoch))
                         if dist.get_rank() == 0 and args.kill_stop:
@@ -460,9 +487,6 @@ def main_worker(args, logger):
                         break
 
     print("Best mAP:", best_mAP)
-
-    if summary_writer:
-        summary_writer.close()
     
     return 0
 
@@ -548,16 +572,22 @@ def train(train_loader, model, ema_m, criterion, optimizer, scheduler, epoch, ar
 
 @torch.no_grad()
 def validate(val_loader, model, criterion, args, logger):
-    batch_time = AverageMeter('Time', ':5.3f')
+    
+    metric_acc = BinaryAccuracy(num_labels=args.num_class).cuda()
+    metric_f1score = BinaryF1Score(num_labels=args.num_class).cuda()
+    metric_recall = BinaryRecall(num_labels=args.num_class).cuda()
+    metric_precision = BinaryPrecision(num_labels=args.num_class).cuda()
+    
     losses = AverageMeter('Loss', ':5.3f')
-    # Acc1 = AverageMeter('Acc@1', ':5.2f')
-    # top5 = AverageMeter('Acc@5', ':5.2f')
-    mem = AverageMeter('Mem', ':.0f', val_only=True)
-    # mAP = AverageMeter('mAP', ':5.3f', val_only=)
+    
+    acc = AverageMeter('Acc', ':5.3f')
+    f1score = AverageMeter('f1score', ':5.3f')
+    precision = AverageMeter('precision', ':5.3f')
+    recall = AverageMeter('recall', ':5.3f')
 
     progress = ProgressMeter(
         len(val_loader),
-        [batch_time, losses, mem],
+        [losses, acc, f1score, precision, recall],
         prefix='Test: ')
 
     # switch to evaluate mode
@@ -580,20 +610,26 @@ def validate(val_loader, model, criterion, args, logger):
                 if torch.isnan(loss):
                     saveflag = True
 
+            # update metrcis
+            metric_acc.update(output_sm, target)
+            metric_f1score.update(output_sm, target)
+            metric_precision.update(output_sm, target)
+            metric_recall.update(output_sm, target)
+
+            # update average
+            acc.update(metric_acc.compute())
+            f1score.update(metric_f1score.compute())
+            precision.update(metric_precision.compute())
+            recall.update(metric_recall.compute())
+
             # record loss
             losses.update(loss.item(), images.size(0))
-            mem.update(torch.cuda.max_memory_allocated() / 1024.0 / 1024.0)
 
             # save some data
-            # output_sm = torch.sigmoid(output)
             _item = torch.cat((output_sm.detach().cpu(), target.detach().cpu()), 1)
-            # del output_sm
-            # del target
+            del output_sm
+            del target
             saved_data.append(_item)
-
-            # measure elapsed time
-            batch_time.update(time.time() - end)
-            end = time.time()
 
             if i % args.print_freq == 0 and dist.get_rank() == 0:
                 progress.display(i, logger)
@@ -620,7 +656,7 @@ def validate(val_loader, model, criterion, args, logger):
             metric_func = voc_mAP                
             mAP, aps = metric_func([os.path.join(args.output, _filename) for _filename in filenamelist], args.num_class, return_each=True)
             
-            logger.info("  mAP: {}".format(mAP))
+            logger.info("  mAP: {} Acc: {} f1score: {} precision: {} recall: {}".format(mAP, acc.avg, f1score.avg, precision.avg, recall.avg))
             logger.info("   aps: {}".format(np.array2string(aps, precision=5)))
         else:
             mAP = 0
@@ -628,7 +664,7 @@ def validate(val_loader, model, criterion, args, logger):
         if dist.get_world_size() > 1:
             dist.barrier()
 
-    return loss_avg, mAP
+    return loss_avg, mAP, aps, acc.avg, f1score.avg, precision.avg, recall.avg
 
 
 ##################################################################################
@@ -684,10 +720,10 @@ def _meter_reduce(meter):
     return meter_avg.item()
 
 
-def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
+def save_checkpoint(state, is_best, filename='checkpoint.pth.tar', output='path/to/output'):
     # torch.save(state, filename)
     if is_best:
-        torch.save(state, os.path.split(filename)[0] + '/model_best.pth.tar')
+        torch.save(state, os.path.join(output, filename+'.pth.tar'))
         # shutil.copyfile(filename, os.path.split(filename)[0] + '/model_best.pth.tar')
 
 

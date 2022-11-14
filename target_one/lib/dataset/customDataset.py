@@ -6,7 +6,6 @@ from PIL import Image
 import cv2
 
 category_map = ('홍계', '배꼽', '피부손상F', '피부손상C', '피부손상S', '골절C', '가슴멍', '날개멍', '다리멍')
-target_map = ['가슴멍']
 
 def image_resize(img):
     output_size = 448
@@ -34,10 +33,11 @@ def image_resize(img):
     return img
 
 class CustomDataset_csv_multiLabel(Dataset): 
-    def __init__(self, sourcePath, transform=None):
+    def __init__(self, sourcePath, target:list, transform=None):
         self.sourcePath = sourcePath
         self.images = os.listdir(sourcePath)
         self.transform = transform
+        self.target = target
         
     def __len__(self): 
         return len(self.images)
@@ -62,9 +62,9 @@ class CustomDataset_csv_multiLabel(Dataset):
         return img, label
     
     def get_multi_label(self,label):
-        result = np.zeros(len(target_map))
+        result = np.zeros(len(self.target))
         for name in label:
-            if name in target_map:
-                result[target_map.index(name)] = 1.0
+            if name in self.target:
+                result[self.target.index(name)] = 1.0
         return result
     

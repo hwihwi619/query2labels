@@ -14,8 +14,8 @@
             
             // target_one
             "args": [
-                "--dataset_dir", "/home/hwi/Downloads/VQIS-POC matched/chest/normal",
-                "--run_name", "가슴멍 VS 정상",
+                "--dataset_dir", "/home/hwi/Downloads/VQIS-POC matched/wing/normal",
+                "--run_name", "날개멍 VS 정상", "--target", "날개멍",
                 "--transfer", "/home/hwi/Desktop/snuGithub/model/Q2L-R101-448/checkpoint.pkl", "--transfer_omit", "query_embed.weight", "fc.W", "fc.b",
                 "--workers", "16", "--batch-size", "1",
                 "--num_class", "1", "--img_size", "448",
@@ -23,7 +23,7 @@
                 "--optim", "AdamW",  "--orid_norm",
                 "--backbone", "resnet101", "--dataname", "custom", "--print-freq", "50", 
                 "--output", "path/to/normal", 
-                "--world-size", "1", "--rank", "0", "--dist-url", "tcp://127.0.0.1:3717", 
+                "--world-size", "1", "--rank", "0", "--dist-url", "tcp://127.0.0.1:3718", 
                 "--gamma_pos", "0", "--gamma_neg", "2", "--dtgfl", 
                 "--epochs", "80", "--pretrained", 
               //  "--cutout", "--n_holes", "1", "--cut_fact", "0.5", 
