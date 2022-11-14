@@ -22,13 +22,12 @@ from utils.misc import clean_state_dict
 
 from .position_encoding import build_position_encoding
 
-
 def get_model_path(modelname):
     """
         Config your pretrained model path here!
     """
     # raise NotImplementedError("Please config your pretrained modelpath!")
-    pretrained_dir = '/config/to/your/pretrained/model/dir/if/needed'
+    pretrained_dir = os.path.join(os.path.dirname(__file__), 'cls_cvt')
     PTDICT = {
         'CvT_w24': 'CvT-w24-384x384-IN-22k.pth',
         'swin_L_384_22k': 'swin_large_patch4_window12_384_22k.pth',

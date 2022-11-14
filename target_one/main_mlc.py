@@ -452,7 +452,7 @@ def main_worker(args, logger):
 
             if dist.get_rank() == 0 or is_best_acc:
                 save_checkpoint({
-                    'epoch': epoch + 1,
+                    'epoch': epoch,
                     'state_dict': state_dict,
                     'best_mAP': best_mAP,
                     'optimizer' : optimizer.state_dict(),
@@ -476,7 +476,7 @@ def main_worker(args, logger):
 
             # early stop
             if args.early_stop:
-                if best_epoch >= 0 and epoch - max(best_epoch, best_regular_epoch) > 8:
+                if best_epoch >= 0 and epoch - max(best_epoch, best_regular_epoch) > 5:
                     mlflow.log_artifacts(args.output)
                     if len(ema_mAP_list) > 1 and ema_mAP_list[-1] < best_ema_mAP:
                         logger.info("epoch - best_epoch = {}, stop!".format(epoch - best_epoch))
