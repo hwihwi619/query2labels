@@ -149,7 +149,7 @@ def main():
     os.environ["MLFLOW_S3_ENDPOINT_URL"] = "http://192.168.0.56:9090"
     os.environ["AWS_ACCESS_KEY_ID"] = "minio"
     os.environ["AWS_SECRET_ACCESS_KEY"] = "minio123"
-    mlflow.set_experiment("Transfer-CvT_Inference")
+    mlflow.set_experiment("CvT_Inference")
     run_name=None
     if args.run_name:
         run_name=args.run_name
@@ -258,7 +258,10 @@ def main_worker(args, logger):
     
     make_csv(args.output, args.target, scores, class_score_thresh_dict, names)
 
-    return 
+    mlflow.log_artifacts(args.output)
+    mlflow.end_run()
+
+
     
 
 
@@ -474,3 +477,4 @@ def make_csv(output, target, scores, class_score_thresh_dict, names):
 
 if __name__ == '__main__':
     main()
+    
