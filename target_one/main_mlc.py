@@ -443,6 +443,8 @@ def main_worker(args, logger):
             best_mAP = max(mAP, best_mAP)
             
             is_best_acc = acc > best_Acc
+            if is_best_acc:
+                best_epoch = epoch
             best_Acc = max(acc, best_Acc)
             # not implemented best acc_ema
             
@@ -450,25 +452,32 @@ def main_worker(args, logger):
             logger.info("   | best regular mAP {} in ep {}".format(best_regular_mAP, best_regular_epoch))
             logger.info("   | best Acc {}".format(best_Acc))
 
-            if dist.get_rank() == 0 or is_best_acc:
+            if is_best or is_best_acc:
                 save_checkpoint({
                     'epoch': epoch,
                     'state_dict': state_dict,
                     'best_mAP': best_mAP,
                     'optimizer' : optimizer.state_dict(),
-                }, is_best=is_best, filename='model_best', output = args.output)
-                mlflow.log_artifacts(args.output)
+                }, is_best=(is_best or is_best_acc), filename='model_best', output = args.output)
+                if epoch==0:
+                    mlflow.log_artifacts(args.output)
+                else:
+                    log_file=os.path.join(args.output, 'log.txt')
+                    model_file=os.path.join(args.output, f'ep{epoch}_model_best.pth.tar')
+                    mlflow.log_artifact(log_file)
+                    mlflow.log_artifact(model_file)
+                logger.info('save model')
 
             if math.isnan(loss) or math.isnan(loss_ema):
-                # save_checkpoint({
-                #     'epoch': epoch + 1,
-                #     # 'arch': args.arch,
-                #     'state_dict': model.state_dict(),
-                #     'best_mAP': best_mAP,
-                #     'optimizer' : optimizer.state_dict(),
-                # }, is_best=is_best, filename='checkpoint_nan'))
                 logger.info('Loss is NaN, break')
-                mlflow.log_artifacts(args.output)
+                # mlflow.log_artifacts(args.output)
+                if epoch==0:
+                    mlflow.log_artifacts(args.output)
+                else:
+                    log_file=os.path.join(args.output, 'log.txt')
+                    model_file=os.path.join(args.output, f'ep{epoch}_model_best.pth.tar')
+                    mlflow.log_artifact(log_file)
+                    mlflow.log_artifact(model_file)
                 mlflow.end_run()
 
                 sys.exit(1)
@@ -477,8 +486,8 @@ def main_worker(args, logger):
             # early stop
             if args.early_stop:
                 if best_epoch >= 0 and epoch - max(best_epoch, best_regular_epoch) > 5:
-                    mlflow.log_artifacts(args.output)
-                    if len(ema_mAP_list) > 1 and ema_mAP_list[-1] < best_ema_mAP:
+                    # mlflow.log_artifacts(args.output)
+                    if len(ema_mAP_list) > 1 and ema_mAP_list[-1] <= best_ema_mAP:
                         logger.info("epoch - best_epoch = {}, stop!".format(epoch - best_epoch))
                         if dist.get_rank() == 0 and args.kill_stop:
                             filename = sys.argv[0].split(' ')[0].strip()
@@ -723,7 +732,7 @@ def _meter_reduce(meter):
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar', output='path/to/output'):
     # torch.save(state, filename)
     if is_best:
-        torch.save(state, os.path.join(output, filename+'.pth.tar'))
+        torch.save(state, os.path.join(output, 'ep' + str(state['epoch'])+ '_'+filename+'.pth.tar'))
         # shutil.copyfile(filename, os.path.split(filename)[0] + '/model_best.pth.tar')
 
 
