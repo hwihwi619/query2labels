@@ -59,7 +59,7 @@ class CustomDataset_csv_multiLabel(Dataset):
             transform = transforms.ToTensor()
             img = transform(img)
 
-        return img, label
+        return img, label, img_path
     
     def get_multi_label(self,label):
         result = np.zeros(len(self.target))

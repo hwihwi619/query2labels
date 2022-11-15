@@ -16,6 +16,13 @@ import torch.optim
 import torch.utils.data
 import torch.utils.data.distributed
 
+import mlflow
+import torchmetrics
+from torchmetrics.classification import BinaryAccuracy
+from torchmetrics.classification import BinaryF1Score
+from torchmetrics.classification import BinaryPrecision
+from torchmetrics.classification import BinaryRecall
+
 import _init_paths
 from dataset.get_dataset import get_datasets
 
@@ -28,12 +35,16 @@ from utils.metric import voc_mAP
 from utils.misc import clean_state_dict
 from utils.slconfig import get_raw_dict
 
+
 def parser_args():
     available_models = ['Q2L-R101-448', 'Q2L-R101-576', 'Q2L-TResL-448', 'Q2L-TResL_22k-448', 'Q2L-SwinL-384', 'Q2L-CvT_w24-384']
 
     parser = argparse.ArgumentParser(description='Query2Label for multilabel classification')
-    parser.add_argument('--dataname', help='dataname', default='custom', choices=['coco14', 'custom', 'chess'])
-    parser.add_argument('--dataset_dir', help='dir of dataset', default='/home/hwi/Downloads/VQIS-POC dataset-crop/image')
+    parser.add_argument('--dataname', help='dataname', default='custom', choices=['custom, chess'])
+    parser.add_argument('--dataset_dir', help='dir of dataset')
+    
+    parser.add_argument('--run_name', default=None, type=str)
+    parser.add_argument('--target', default=None, type=str)
     
     parser.add_argument('--img_size', default=448, type=int,
                         help='image size. default(448)')
@@ -51,20 +62,20 @@ def parser_args():
                         help='loss functin')
     parser.add_argument('--num_class', default=9, type=int,
                         help="Number of classes.")
-    parser.add_argument('-j', '--workers', default=16, type=int, metavar='N',
+    parser.add_argument('-j', '--workers', default=8, type=int, metavar='N',
                         help='number of data loading workers (default: 8)')
-    parser.add_argument('-b', '--batch-size', default=1, type=int,
+    parser.add_argument('-b', '--batch-size', default=8, type=int,
                         metavar='N',
                         help='mini-batch size (default: 16), this is the total '
                             'batch size of all GPUs')
-    parser.add_argument('-p', '--print-freq', default=100, type=int,
+    parser.add_argument('-p', '--print-freq', default=50, type=int,
                         metavar='N', help='print frequency (default: 10)')
-    parser.add_argument('--resume', type=str, metavar='PATH',
+    parser.add_argument('--infer', type=str, metavar='PATH',
                         help='path to latest checkpoint (default: none)')
-    
     parser.add_argument('--transfer', default='', type=str, metavar='PATH',
                         help='path to latest checkpoint (default: none)')
     parser.add_argument('--transfer_omit', default=[], type=str, nargs='*')
+    
 
     parser.add_argument('--pretrained', dest='pretrained', action='store_true',
                         help='use pre-trained model. default is False. ')
@@ -117,10 +128,9 @@ def parser_args():
 
     # update parameters with pre-defined config file
     if args.config:
-        with open(args.config, 'r') as f:
+        with open(args.config, 'r', encoding='UTF8') as f:
             cfg_dict = json.load(f)
         for k,v in cfg_dict.items():
-            
             setattr(args, k, v)
 
     return args
@@ -130,16 +140,23 @@ def get_args():
     return args
 
 
-best_mAP = 0
-
 def main():
     args = get_args()
     
+    mlflow.set_tracking_uri("http://192.168.0.56:5000")
+    remote_server_uri = "http://192.168.0.56:5000" # set to your server URI
+    mlflow.set_tracking_uri(remote_server_uri)
+    os.environ["MLFLOW_S3_ENDPOINT_URL"] = "http://192.168.0.56:9090"
+    os.environ["AWS_ACCESS_KEY_ID"] = "minio"
+    os.environ["AWS_SECRET_ACCESS_KEY"] = "minio123"
+    mlflow.set_experiment("Transfer-CvT_Inference")
+    run_name=None
+    if args.run_name:
+        run_name=args.run_name
+    mlflow.start_run(run_name=run_name)
+    
     if 'WORLD_SIZE' in os.environ:
         assert args.world_size > 0, 'please set --world-size and --rank in the command line'
-        # launch by torch.distributed.launch
-        # Single node
-        #   python -m torch.distributed.launch --nproc_per_node=8 main.py --world-size 1 --rank 0 ...
         local_world_size = int(os.environ['WORLD_SIZE'])
         args.world_size = args.world_size * local_world_size
         args.rank = args.rank * local_world_size + args.local_rank
@@ -183,30 +200,9 @@ def main():
     logger.info('dist.get_rank(): {}'.format(dist.get_rank()))
     logger.info('local_rank: {}'.format(args.local_rank))
 
-    scores = main_worker(args, logger)
-    
-    # print(scores)
-    class_score_thresh_dict = {}
-    # class_score_thresh_dict["정상"]     =  0.5
-    class_score_thresh_dict["홍계"]     =  0.5
-    class_score_thresh_dict["배꼽"]     =  0.5
-    class_score_thresh_dict["피부손상F"] = 0.5
-    class_score_thresh_dict["피부손상C"] = 0.5
-    class_score_thresh_dict["피부손상S"] = 0.5
-    class_score_thresh_dict["골절C"]    =  0.5
-    class_score_thresh_dict["가슴멍"]    = 0.5
-    class_score_thresh_dict["날개멍"]    = 0.5
-    class_score_thresh_dict["다리멍"]    = 0.5
-    print('threshold :', class_score_thresh_dict)
-    
-    cum_result = {"정상":0, "홍계":0, "배꼽":0, "피부손상F":0, "피부손상C":0, "피부손상S":0, "골절C":0, "가슴멍":0, "날개멍":0, "다리멍":0}
-    score_values=[]
-    
-    make_csv(args, scores, cum_result, class_score_thresh_dict)
-    
+    return main_worker(args, logger)
 
 def main_worker(args, logger):
-    global best_mAP
 
     # build model
     model = build_q2l(args)
@@ -220,95 +216,112 @@ def main_worker(args, logger):
 
 
     # optionally resume from a checkpoint
-    if args.resume:
-        if os.path.isfile(args.resume):
-            logger.info("=> loading checkpoint '{}'".format(args.resume))
-            checkpoint = torch.load(args.resume, map_location=torch.device(dist.get_rank()))
+    if args.infer:
+        if os.path.isfile(args.infer):
+            logger.info("=> loading checkpoint '{}'".format(args.infer))
+            checkpoint = torch.load(args.infer, map_location=torch.device(dist.get_rank()))
             state_dict = clean_state_dict(checkpoint['state_dict'])
-            
-            for omit_name in args.transfer_omit:
-                del state_dict[omit_name]
-            
+            # for omit_name in args.transfer_omit:
+            #     del state_dict[omit_name]
             model.module.load_state_dict(state_dict, strict=True)
             del checkpoint
             del state_dict
             torch.cuda.empty_cache() 
         else:
-            logger.info("=> no checkpoint found at '{}'".format(args.resume))
+            logger.info("=> no checkpoint found at '{}'".format(args.infer))
 
     # Data loading code
-    _, val_dataset = get_datasets(args)
+    _, test_dataset = get_datasets(args)
     assert args.batch_size // dist.get_world_size() == args.batch_size / dist.get_world_size(), 'Batch size is not divisible by num of gpus.'
-    val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, shuffle=False)
-    val_loader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=args.batch_size // dist.get_world_size(), shuffle=False,
-        num_workers=args.workers, pin_memory=True, sampler=val_sampler)
+    test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset, shuffle=False)
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset, batch_size=args.batch_size // dist.get_world_size(), shuffle=False,
+        num_workers=args.workers, pin_memory=True, sampler=test_sampler)
 
+    names = ['정상', args.target]
+    
+    _, mAP, aps, acc, f1score, precision, recall, scores = inference(test_loader, model, criterion, args, logger, names)
+    logger.info(' * mAP {mAP:.1f} acc {acc:.1f} f1score {f1score:.1f} precision {precision:.1f} recall {recall:.1f}'
+            .format(mAP=mAP, acc=acc, f1score=f1score, precision=precision, recall=recall))
+    
+    class_score_thresh_dict = {}
+    class_score_thresh_dict["홍계"]     =  0.5
+    class_score_thresh_dict["배꼽"]     =  0.5
+    class_score_thresh_dict["피부손상F"] = 0.5
+    class_score_thresh_dict["피부손상C"] = 0.5
+    class_score_thresh_dict["피부손상S"] = 0.5
+    class_score_thresh_dict["골절C"]    =  0.5
+    class_score_thresh_dict["가슴멍"]    = 0.5
+    class_score_thresh_dict["날개멍"]    = 0.5
+    class_score_thresh_dict["다리멍"]    = 0.5
+    print(args.target, 'threshold :', class_score_thresh_dict[args.target])
+    
+    make_csv(args.output, args.target, scores, class_score_thresh_dict, names)
 
-    # for eval only
-    _, mAP, scores = validate(val_loader, model, criterion, args, logger, val_dataset)
-    logger.info(' * mAP {mAP:.1f}'
-            .format(mAP=mAP))
-    return scores
+    return 
     
 
 
 @torch.no_grad()
-def validate(val_loader, model, criterion, args, logger, val_dataset):
-    batch_time = AverageMeter('Time', ':5.3f')
+def inference(test_loader, model, criterion, args, logger, names):
+    scores = {name: {} for name in names}  # {클래스: {파일명: 스코어}}
+    
+    metric_acc = BinaryAccuracy(num_labels=args.num_class).cuda()
+    metric_f1score = BinaryF1Score(num_labels=args.num_class).cuda()
+    metric_recall = BinaryRecall(num_labels=args.num_class).cuda()
+    metric_precision = BinaryPrecision(num_labels=args.num_class).cuda()
+    
     losses = AverageMeter('Loss', ':5.3f')
-    mem = AverageMeter('Mem', ':.0f', val_only=True)
+    
+    acc = AverageMeter('Acc', ':5.3f')
+    f1score = AverageMeter('f1score', ':5.3f')
+    precision = AverageMeter('precision', ':5.3f')
+    recall = AverageMeter('recall', ':5.3f')
 
     progress = ProgressMeter(
-        len(val_loader),
-        [batch_time, losses, mem],
+        len(test_loader),
+        [losses, acc, f1score, precision, recall],
         prefix='Test: ')
 
     # switch to evaluate mode
     model.eval()
     saved_data = []
     with torch.no_grad():
-        end = time.time()
-        for i, (images, target, s) in enumerate(val_loader):
+        for i, (images, target, img_path) in enumerate(test_loader):
             images = images.cuda(non_blocking=True)
             target = target.cuda(non_blocking=True)
-            
-            # get result data
-            if args.dataname=='custom' and args.resume:
-                img_path = val_dataset.get_img_path(i)
 
-                # compute output
-                with torch.cuda.amp.autocast(enabled=args.amp):
-                    output = model(images)
-                    loss = criterion(output, target)
-                    output_sm = torch.sigmoid(output)
-                    for i, ss in enumerate(s):
-                        if '001435_B_SAM' in ss:
-                            print(output_sm)
-                    for idx, pred in enumerate(output_sm[0]):
-                        scores[names[idx]][img_path] = pred.item()
-                        
-            else :
-                # compute output
-                with torch.cuda.amp.autocast(enabled=args.amp):
-                    output = model(images)
-                    # print(output)
-                    loss = criterion(output, target)
-                    output_sm = torch.sigmoid(output)
-                
-                        
+            # compute output
+            with torch.cuda.amp.autocast(enabled=args.amp):
+                output = model(images)
+                loss = criterion(output, target)
+                if args.loss_dev > 0:
+                    loss *= args.loss_dev
+                output_sm = torch.sigmoid(output)
+                if torch.isnan(loss):
+                    saveflag = True
+                scores[args.target][img_path[0]] = output_sm.item()
+
+            # update metrcis
+            metric_acc.update(output_sm, target)
+            metric_f1score.update(output_sm, target)
+            metric_precision.update(output_sm, target)
+            metric_recall.update(output_sm, target)
+
+            # update average
+            acc.update(metric_acc.compute())
+            f1score.update(metric_f1score.compute())
+            precision.update(metric_precision.compute())
+            recall.update(metric_recall.compute())
 
             # record loss
             losses.update(loss.item(), images.size(0))
-            mem.update(torch.cuda.max_memory_allocated() / 1024.0 / 1024.0)
 
             # save some data
             _item = torch.cat((output_sm.detach().cpu(), target.detach().cpu()), 1)
+            del output_sm
+            del target
             saved_data.append(_item)
-
-            # measure elapsed time
-            batch_time.update(time.time() - end)
-            end = time.time()
 
             if i % args.print_freq == 0 and dist.get_rank() == 0:
                 progress.display(i, logger)
@@ -320,7 +333,8 @@ def validate(val_loader, model, criterion, args, logger, val_dataset):
             _meter_reduce if dist.get_world_size() > 1 else lambda x: x.avg,
             [losses]
         )
-
+        
+        # import ipdb; ipdb.set_trace()
         # calculate mAP
         saved_data = torch.cat(saved_data, 0).numpy()
         saved_name = 'saved_data_tmp.{}.txt'.format(dist.get_rank())
@@ -334,7 +348,7 @@ def validate(val_loader, model, criterion, args, logger, val_dataset):
             metric_func = voc_mAP                
             mAP, aps = metric_func([os.path.join(args.output, _filename) for _filename in filenamelist], args.num_class, return_each=True)
             
-            logger.info("  mAP: {}".format(mAP))
+            logger.info("  mAP: {} Acc: {} f1score: {} precision: {} recall: {}".format(mAP, acc.avg, f1score.avg, precision.avg, recall.avg))
             logger.info("   aps: {}".format(np.array2string(aps, precision=5)))
         else:
             mAP = 0
@@ -342,7 +356,7 @@ def validate(val_loader, model, criterion, args, logger, val_dataset):
         if dist.get_world_size() > 1:
             dist.barrier()
 
-    return loss_avg, mAP, scores
+    return loss_avg, mAP, aps, acc.avg, f1score.avg, precision.avg, recall.avg, scores
 
 
 ##################################################################################
@@ -421,44 +435,42 @@ def kill_process(filename:str, holdpid:int) -> List[str]:
             os.kill(int(idname), signal.SIGKILL)
     return idlist
 
-def get_predict(img_path, scores, names, class_score_thresh_dict):
-    new_label = 9
+# def get_predict(img_path, scores, class_score_thresh_dict, names):
+#     # norm_index = names.index('정상')
+    norm_index = 1
+    new_label = norm_index
     for name in names:
+        if name =='정상':
+            continue
         # if new_label == 9 and score_dict[img_path][name] > class_score_thresh_dict[name]:
-        if new_label == 9 and scores[name][img_path] > class_score_thresh_dict[name]:
-            new_label = names.index(name)+1
-    return names[new_label-1]
+        if new_label == norm_index and scores[name][img_path] > class_score_thresh_dict[name]:
+            new_label = names.index(name)
+#     return new_label
 
-def make_csv(args, scores, cum_result, class_score_thresh_dict):
-    score_path = os.path.join(args.output, f'scores.csv')
-    # score_path = 'scores.csv'
-    score_values = []
-
-    img_paths = list(scores[names[0]].keys())
+def make_csv(output, target, scores, class_score_thresh_dict, names):
+    cum_result = {"정상":0, "홍계":0, "배꼽":0, "피부손상F":0, "피부손상C":0, "피부손상S":0, "골절C":0, "가슴멍":0, "날개멍":0, "다리멍":0}
+    score_values=[]    
+    
+    score_path = os.path.join(output, f'scores.csv')
+    img_paths = list(scores[target].keys())
     
     for img_path in img_paths:
-        conclusion = get_predict(img_path, scores, names, class_score_thresh_dict)
-        is_normal=True
-        for name in names:
-            if scores[name][img_path]:
-                is_normal = False
-        if is_normal:
-            conclusion='정상'
-        score_values.append([img_path] + [scores[name][img_path] for name in names] + [conclusion])
+        if scores[target][img_path] > class_score_thresh_dict[target]:
+            conclusion = target
+        else:
+            conclusion = '정상'
+        score_values.append([img_path] + [scores[target][img_path]] + [conclusion])
         cum_result[conclusion] += 1
 
     # write scores.csv
     with open(score_path, 'w', encoding='utf-8-sig') as f:
-        columns = ["image_path"] + names + ["predict"]
+        columns = ["image_path"] + [target] + ["predict"]
         f.write(','.join(columns)+'\n')
         for value in score_values:
             f.write(','.join([value[0]] + list(map(lambda v: f"{v:.6f}", value[1:-1]))+[value[-1]])+'\n')
 
     print()
     print('▶▶ 최종결과 :', cum_result)
-    
+
 if __name__ == '__main__':
-    names = ["홍계", "배꼽", "피부손상F", "피부손상C", "피부손상S", "골절C", "가슴멍", "날개멍", "다리멍"]
-    
     main()
-    

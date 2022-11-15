@@ -29,33 +29,16 @@ def get_datasets(args):
         dataset_dir = args.dataset_dir
         target_map=args.target.split(",")
         print('args.dataset_dir', args.dataset_dir)
-        if args.resume: 
-            print('resume')
-            val_dataset = CustomDataset_csv_multiLabel(
-            sourcePath=osp.join(dataset_dir, 'image/test'),
-            transform=test_data_transform,
-            csv_file=osp.join(dataset_dir, 'annotation/VQIS-TEST.csv')
-            )
-            print("len(val_dataset):", len(val_dataset))
-            return None, val_dataset 
-        else:
-            train_data_transform_list.insert(1, transforms.RandomHorizontalFlip())
-            train_dataset = CustomDataset_csv_multiLabel(
-                sourcePath=osp.join(dataset_dir, 'train'),
-                target=target_map,
-                transform=train_data_transform,
-                # csv_file=osp.join(dataset_dir, 'annotation/VQIS-TRAIN.csv')
-            )
-            val_dataset = CustomDataset_csv_multiLabel(
-                sourcePath=osp.join(dataset_dir, 'val'),
-                target=target_map,
-                transform=test_data_transform,
-                # csv_file=osp.join(dataset_dir, 'annotation/VQIS-VAL.csv')
-            )
+    
+        val_dataset = CustomDataset_csv_multiLabel(
+        # sourcePath=osp.join(dataset_dir, 'image/test'),
+        sourcePath=dataset_dir,
+        target=target_map,
+        transform=test_data_transform,
+        )
 
     else:
         raise NotImplementedError("Unknown dataname %s" % args.dataname)
 
-    print("len(train_dataset):", len(train_dataset)) 
     print("len(val_dataset):", len(val_dataset))
-    return train_dataset, val_dataset
+    return None, val_dataset
