@@ -229,6 +229,7 @@ def main_worker(args, logger):
             torch.cuda.empty_cache() 
         else:
             logger.info("=> no checkpoint found at '{}'".format(args.infer))
+            sys.exit(1)
 
     # Data loading code
     _, test_dataset = get_datasets(args)
@@ -241,7 +242,7 @@ def main_worker(args, logger):
     names = ['정상', args.target]
     
     _, mAP, aps, acc, f1score, precision, recall, scores = inference(test_loader, model, criterion, args, logger, names)
-    logger.info(' * mAP {mAP:.1f} acc {acc:.1f} f1score {f1score:.1f} precision {precision:.1f} recall {recall:.1f}'
+    logger.info(' * mAP {mAP:.3f} acc {acc:.3f} f1score {f1score:.3f} precision {precision:.3f} recall {recall:.3f}'
             .format(mAP=mAP, acc=acc, f1score=f1score, precision=precision, recall=recall))
     
     class_score_thresh_dict = {}
@@ -462,15 +463,16 @@ def make_csv(output, target, scores, class_score_thresh_dict, names):
             conclusion = target
         else:
             conclusion = '정상'
-        score_values.append([img_path] + [scores[target][img_path]] + [conclusion])
+        answer = target if target in img_path else "정상"
+        score_values.append([img_path] + [scores[target][img_path]] + [conclusion, answer])
         cum_result[conclusion] += 1
 
     # write scores.csv
     with open(score_path, 'w', encoding='utf-8-sig') as f:
-        columns = ["image_path"] + [target] + ["predict"]
+        columns = ["image_path"] + [target] + ["predict", "Answer"]
         f.write(','.join(columns)+'\n')
         for value in score_values:
-            f.write(','.join([value[0]] + list(map(lambda v: f"{v:.6f}", value[1:-1]))+[value[-1]])+'\n')
+            f.write(','.join([value[0]] + list(map(lambda v: f"{v:.6f}", [value[1]]))+value[2:])+'\n')
 
     print()
     print('▶▶ 최종결과 :', cum_result)
